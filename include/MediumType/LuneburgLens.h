@@ -1,13 +1,12 @@
 #pragma once
 
-#include "Simulation/Medium.h"
 #include <glm/glm.hpp>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 #include <cstddef>
 
-class LuneburgLens : public Medium {
+class LuneburgLens {
 public:
 
     LuneburgLens(double radius, const glm::dvec3& center)
@@ -19,7 +18,7 @@ public:
         center_ = center;
     }
 
-    double refractiveIndex(const glm::dvec3& position) const override
+    double refractiveIndex(const glm::dvec3& position) const
     {
         glm::dvec3 displacement = position - center_;
         double r2 = glm::dot(displacement, displacement);
@@ -30,7 +29,7 @@ public:
         return std::sqrt(2.0 - r2 / (radius_ * radius_));
     }
 
-    glm::dvec3 gradient(const glm::dvec3& position) const override
+    glm::dvec3 gradient(const glm::dvec3& position) const
     {
         glm::dvec3 displacement = position - center_;
         double r2 = glm::dot(displacement, displacement);
@@ -43,7 +42,7 @@ public:
         return -displacement / (radius_ * radius_ * n);
     }
 
-    glm::dmat3 hessian(const glm::dvec3& position) const override
+    glm::dmat3 hessian(const glm::dvec3& position) const
     {
         glm::dvec3 d = position - center_;
         double r2 = glm::dot(d, d);
@@ -65,7 +64,7 @@ public:
 
     glm::dvec3 getCenter() const { return center_; }
 
-    bool isInside(const glm::dvec3& position) const override
+    bool isInside(const glm::dvec3& position) const
     {
         glm::dvec3 d = position - center_;
 
@@ -74,19 +73,19 @@ public:
 
     std::vector<double> indexParameterGradient(
         const glm::dvec3& position
-    ) const override
+    ) const
     {
         return {};
     }
 
     std::vector<glm::dvec3> gradientParameterGradient(
         const glm::dvec3& position
-    ) const override
+    ) const
     {
         return {};
     }
 
-    std::size_t parameterCount() const override
+    std::size_t parameterCount() const
     {
         return 0;
     }
