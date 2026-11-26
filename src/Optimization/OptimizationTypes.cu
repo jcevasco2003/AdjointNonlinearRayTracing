@@ -253,6 +253,17 @@ void Adam::reset()
     timestep_ = 0;
 }
 
+void Adam::setLearningRate(double learningRate)
+{
+    if (!std::isfinite(learningRate) || learningRate <= 0.0) {
+        throw std::invalid_argument(
+            "Adam: learning rate must be positive"
+        );
+    }
+
+    config_.learningRate = learningRate;
+}
+
 
 
 // ============================================================

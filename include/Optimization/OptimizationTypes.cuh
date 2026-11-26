@@ -37,6 +37,8 @@ public:
 
     void reset() override;
 
+    void setLearningRate(double learningRate);
+
 private:
 
     AdamConfig config_;

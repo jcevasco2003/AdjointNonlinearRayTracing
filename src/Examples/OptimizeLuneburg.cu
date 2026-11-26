@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -271,10 +272,13 @@ glm::dvec3 randomUnitVector(std::mt19937_64& rng)
 std::vector<TrainingRay> generateTrainingRays(
     double radius,
     int raysPerDirection,
-    double startEpsilon
+    double startEpsilon,
+    std::uint64_t seed
 )
 {
     constexpr double GOLDEN_ANGLE = 2.399963229728653;
+    constexpr double maxRadial = 0.98;
+    constexpr double edgeBias = 0.65; // > 0.5 da algo más de peso al borde que al centro
 
     const glm::dvec3 principalDirections[6] = {
         glm::dvec3( 1.0,  0.0,  0.0),
@@ -285,7 +289,7 @@ std::vector<TrainingRay> generateTrainingRays(
         glm::dvec3( 0.0,  0.0, -1.0)
     };
 
-    std::mt19937_64 rng(42);
+    std::mt19937_64 rng(seed);
 
     const glm::dvec3 randomAxis = randomUnitVector(rng);
 
@@ -302,7 +306,7 @@ std::vector<TrainingRay> generateTrainingRays(
     );
 
     std::vector<TrainingRay> rays;
-    rays.reserve(6 * raysPerDirection);
+    rays.reserve(static_cast<std::size_t>(6 * raysPerDirection));
 
     for (const glm::dvec3& principal : principalDirections) {
 
@@ -322,22 +326,29 @@ std::vector<TrainingRay> generateTrainingRays(
 
         for (int i = 0; i < raysPerDirection; ++i) {
 
-            const double radial =
-                0.9 * std::sqrt(
-                    (static_cast<double>(i) + 0.5) /
-                    raysPerDirection
-                );
+            double radial = 0.0;
+            double angle = 0.0;
 
-            const double angle = GOLDEN_ANGLE * i;
+            if (i > 0) {
+                const int outerCount = std::max(1, raysPerDirection - 1);
+                const double s =
+                    (static_cast<double>(i) - 0.5) /
+                    static_cast<double>(outerCount);
+
+                // Smoothstep concentra cerca de s=0 y s=1; la potencia en s
+                // permite inclinar el balance entre centro y borde.
+                const double biasedS = std::pow(s, 1.0 + (1.0 - edgeBias));
+                const double smooth = biasedS * biasedS * (3.0 - 2.0 * biasedS);
+
+                radial = maxRadial * smooth;
+                angle = GOLDEN_ANGLE * static_cast<double>(i);
+            }
 
             const double u = radial * std::cos(angle);
             const double v = radial * std::sin(angle);
 
             const glm::dvec3 offset =
                 radius * (u * tangent + v * bitangent);
-
-            // Recta: p(t) = offset + t * incoming.
-            // Calculamos el intervalo de intersección con [-1, 1]^3.
 
             double tEnter = -std::numeric_limits<double>::infinity();
             double tExit  =  std::numeric_limits<double>::infinity();
@@ -453,11 +464,12 @@ int main()
 
         constexpr double radius = 1.0;
 
-        constexpr int raysPerDirection = 17;
+        int raysPerDirection = 32;
         constexpr int rayBundleCount = 6;
 
         constexpr int maxIterations = 2000;
         constexpr int saveEvery = 10;
+        constexpr int refineEvery = 400;
 
         constexpr double learningRate = 1e-3;
         constexpr double convergenceTolerance = 1e-9;
@@ -487,8 +499,8 @@ int main()
         const double3 lensCenter =
             make_double3(0.0, 0.0, 0.0);
 
-        const std::size_t rayCount =
-            raysPerDirection * rayBundleCount;
+        std::size_t rayCount =
+            static_cast<std::size_t>(raysPerDirection) * rayBundleCount;
 
         // ----------------------------------------------------
         // CUDA device
@@ -524,7 +536,7 @@ int main()
             << "\n";
 
         std::cout
-            << "Ray count: "
+            << "Initial ray count: "
             << rayCount
             << "\n";
 
@@ -562,7 +574,7 @@ int main()
             1.0
         );
 
-        const std::size_t parameterCount =
+        std::size_t parameterCount =
             medium.parameterCountHost();
 
         std::cout
@@ -579,33 +591,14 @@ int main()
         );
 
         // ----------------------------------------------------
-        // Ray generation
+        // Host & device buffers
         // ----------------------------------------------------
-
-        const std::vector<TrainingRay> trainingRays =
-            generateTrainingRays(
-                radius,
-                raysPerDirection,
-                rayStartEpsilon
-            );
 
         std::vector<Ray> hostRays(rayCount);
         std::vector<double3> hostInitialDirections(rayCount);
 
-        for (std::size_t i = 0; i < rayCount; ++i) {
-            hostRays[i] = trainingRays[i].ray;
-            hostInitialDirections[i] =
-                trainingRays[i].incomingDirection;
-        }
-
-        // ----------------------------------------------------
-        // Device buffers
-        // ----------------------------------------------------
-
         DeviceBuffer<Ray> d_rays(rayCount);
-
         DeviceBuffer<double3> d_initialDirections(rayCount);
-
         DeviceBuffer<DeviceTraceResult> d_traceResults(rayCount);
 
         DeviceBuffer<double3> d_finalPositions(rayCount);
@@ -619,7 +612,6 @@ int main()
         DeviceBuffer<double> d_parameterGradient(parameterCount);
 
         DeviceBuffer<double> d_meanLoss(1);
-
         DeviceBuffer<unsigned int> d_invalidCount(1);
 
         // ----------------------------------------------------
@@ -661,32 +653,6 @@ int main()
         );
 
         // ----------------------------------------------------
-        // Upload rays
-        // ----------------------------------------------------
-
-        checkCuda(
-            cudaMemcpyAsync(
-                d_rays.get(),
-                hostRays.data(),
-                rayCount * sizeof(Ray),
-                cudaMemcpyHostToDevice,
-                stream
-            ),
-            "upload rays"
-        );
-
-        checkCuda(
-            cudaMemcpyAsync(
-                d_initialDirections.get(),
-                hostInitialDirections.data(),
-                rayCount * sizeof(double3),
-                cudaMemcpyHostToDevice,
-                stream
-            ),
-            "upload initial directions"
-        );
-
-        // ----------------------------------------------------
         // Optimization loop
         // ----------------------------------------------------
 
@@ -710,6 +676,125 @@ int main()
         for (int iteration = 0;
              iteration < maxIterations;
              ++iteration) {
+
+            // ------------------------------------------------
+            // Refinamiento cada N iteraciones
+            // ------------------------------------------------
+
+            if (iteration > 0 && iteration % refineEvery == 0) {
+
+                checkCuda(
+                    cudaStreamSynchronize(stream),
+                    "synchronize before medium refinement"
+                );
+
+                const glm::uvec3 currentRes = medium.resolution();
+                const glm::uvec3 nextRes = currentRes * 2u;
+
+                medium.refine(nextRes);
+
+                parameterCount = medium.parameterCountHost();
+                deviceMedium = static_cast<const Medium*>(medium.deviceObject());
+                deviceOptimizableMedium =
+                    static_cast<const OptimizableMedium*>(medium.deviceObject());
+
+                d_parameterGradient = DeviceBuffer<double>(parameterCount);
+
+                // Reducir learning rate al refinar para evitar picos en grillas finas
+                adamConfig.learningRate *= 0.5;
+                optimizer.setLearningRate(adamConfig.learningRate);
+                optimizer.initialize(parameterCount);
+
+                // Actualizar dt y maxSteps proporcionalmente al tamaño de celda
+                tracerConfig.stepSize *= 0.5;
+                tracerConfig.maxSteps *= 2;
+                tracer = Tracer(tracerConfig);
+
+                adjointConfig.stepSize = tracerConfig.stepSize;
+                adjointConfig.maxSteps *= 2;
+                adjointSolver = AdjointStateSolver(adjointConfig);
+
+                projectOutsideLens(
+                    medium,
+                    lensCenter,
+                    radius,
+                    stream
+                );
+
+                stableIterations = 0;
+
+                raysPerDirection = raysPerDirection * 2;
+                const std::size_t newRayCount =
+                    static_cast<std::size_t>(raysPerDirection) * rayBundleCount;
+
+                if (newRayCount != rayCount) {
+                    rayCount = newRayCount;
+                    d_rays = DeviceBuffer<Ray>(rayCount);
+                    d_initialDirections = DeviceBuffer<double3>(rayCount);
+                    d_traceResults = DeviceBuffer<DeviceTraceResult>(rayCount);
+                    d_finalPositions = DeviceBuffer<double3>(rayCount);
+                    d_finalDirections = DeviceBuffer<double3>(rayCount);
+                    d_losses = DeviceBuffer<double>(rayCount);
+                    d_deltaX = DeviceBuffer<double3>(rayCount);
+                    d_deltaV = DeviceBuffer<double3>(rayCount);
+                    hostRays.resize(rayCount);
+                    hostInitialDirections.resize(rayCount);
+                }
+
+                std::cout
+                    << "Refined voxel grid at step " << iteration
+                    << " -> resolution: "
+                    << nextRes.x << "x" << nextRes.y << "x" << nextRes.z
+                    << " (" << parameterCount << " parameters)"
+                    << ", rays=" << rayCount
+                    << ", dt=" << tracerConfig.stepSize
+                    << ", lr=" << adamConfig.learningRate << "\n";
+            }
+
+            // ------------------------------------------------
+            // Generar y subir rayos en cada iteración
+            // ------------------------------------------------
+
+            checkCuda(
+                cudaStreamSynchronize(stream),
+                "synchronize before uploading new iteration rays"
+            );
+
+            const std::vector<TrainingRay> trainingRays =
+                generateTrainingRays(
+                    radius,
+                    raysPerDirection,
+                    rayStartEpsilon,
+                    42ULL + static_cast<std::uint64_t>(iteration)
+                );
+
+            for (std::size_t i = 0; i < rayCount; ++i) {
+                hostRays[i] = trainingRays[i].ray;
+                hostInitialDirections[i] =
+                    trainingRays[i].incomingDirection;
+            }
+
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_rays.get(),
+                    hostRays.data(),
+                    rayCount * sizeof(Ray),
+                    cudaMemcpyHostToDevice,
+                    stream
+                ),
+                "upload rays"
+            );
+
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_initialDirections.get(),
+                    hostInitialDirections.data(),
+                    rayCount * sizeof(double3),
+                    cudaMemcpyHostToDevice,
+                    stream
+                ),
+                "upload initial directions"
+            );
 
             // ------------------------------------------------
             // Forward tracing
@@ -936,6 +1021,20 @@ int main()
             // ------------------------------------------------
             // Adam update
             // ------------------------------------------------
+
+            if (iteration >= refineEvery - 2 && iteration <= refineEvery + 5) {
+                const auto params = medium.downloadParameters();
+                double minEta = params[0], maxEta = params[0];
+                for (double v : params) {
+                    minEta = std::min(minEta, v);
+                    maxEta = std::max(maxEta, v);
+                }
+                std::cout
+                    << "  [debug] iter=" << iteration
+                    << " res=" << medium.resolution().x
+                    << " dLoss=" << std::abs(previousLoss - meanLoss)
+                    << " eta=[" << minEta << ", " << maxEta << "]\n";
+            }
 
             optimizer.step(
                 medium.deviceParameters(),
